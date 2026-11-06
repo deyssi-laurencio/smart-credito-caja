@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
+import cohere
 
 app = FastAPI(title="SmartCrédito - Caja", version="1.0")
 
@@ -16,9 +18,12 @@ app.add_middleware(
 
 # Tus credenciales de Supabase
 SUPABASE_URL = "https://ndcmdsnxitgggacrngau.supabase.co"
-SUPABASE_KEY = "sb_secret_fxnf7cftE1OS9cSaoKvHUw_NZqgdZgy"  # Coloca aquí tu Publishable o Secret key de Supabase
+SUPABASE_KEY = "sb_secret_MOmF2fRgGukAP8QsPPeRbA_MaNDNjcY" 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Inicializar cliente de la API de IA (COHERE CORRECTO)
+cohere_client = cohere.Client(api_key="cohere_2mVpFTauX86YpLuWs5mS0vp1BqylZo25EfCbUfmp2GNBMV")
 
 class SolicitudCredito(BaseModel):
     nombre_cliente: str
@@ -35,10 +40,34 @@ def evaluar_credito(solicitud: SolicitudCredito):
     
     if cuota_estimada <= limite_permitido:
         estado = "Aprobado"
-        dictamen = "La cuota estimada se encuentra dentro del 40% de los ingresos declarados. Viabilidad favorable para microcrédito."
+        evaluacion_preliminar = "Favorable (Cuota dentro del 40% de los ingresos declarados)"
     else:
         estado = "Rechazado"
-        dictamen = "La cuota estimada supera el ratio de endeudamiento permitido (40%). Riesgo crediticio elevado."
+        evaluacion_preliminar = "Desfavorable (Supera el ratio de endeudamiento permitido del 40%)"
+
+    # Generación de dictamen con la API de Cohere (command-r-08-2024)
+    try:
+        prompt_sistema = (
+            "Eres un analista de riesgos senior para una Caja de Ahorro y Crédito. "
+            "Redacta un dictamen crediticio formal y un análisis de riesgo breve justificando la decisión."
+        )
+        prompt_usuario = (
+            f"Cliente: {solicitud.nombre_cliente}, DNI: {solicitud.dni}\n"
+            f"Ingresos mensuales: {solicitud.ingresos_mensuales}\n"
+            f"Monto solicitado: {solicitud.monto_solicitado} (Cuota estimada: {cuota_estimada:.2f})\n"
+            f"Motivo: {solicitud.motivo_prestamo}\n"
+            f"Evaluación del sistema: {estado}. {evaluacion_preliminar}"
+        )
+
+        response = cohere_client.chat(
+            model="command-r-08-2024",
+            message=prompt_usuario,
+            preamble=prompt_sistema,
+            temperature=0.3
+        )
+        dictamen = response.text
+    except Exception as e:
+        dictamen = f"Dictamen automático por reglas: {evaluacion_preliminar}. (Nota Cohere: {str(e)})"
 
     # Guardar automáticamente en tu tabla de Supabase
     data = {
@@ -51,13 +80,13 @@ def evaluar_credito(solicitud: SolicitudCredito):
         "dictamen_ia": dictamen
     }
     
-    response = supabase.table("solicitudes_credito").insert(data).execute()
+    response_db = supabase.table("solicitudes_credito").insert(data).execute()
     
     return {
-        "mensaje": "Evaluación procesada y guardada en Supabase con éxito",
+        "mensaje": "Evaluación con Cohere procesada y guardada en Supabase con éxito",
         "estado": estado,
         "dictamen": dictamen,
-        "detalles": response.data
+        "detalles": response_db.data
     }
 
 @app.get("/solicitudes")
